@@ -832,11 +832,10 @@ class refiner_xnet(nn.Module):
         dec_feats_ll, dec_ll = self.decoder_ll(feats_ll)      
         dec_feats_hf, dec_hf = self.decoder_hf(feats_hf)
 
-        hf_cat_up   = F.interpolate(hf_cat, size=rgb_sharp.shape[-2:], mode='nearest')
-        shallow_feat = self.stem_shallow(torch.cat([rgb_sharp, hf_cat_up], 1))  # 720×1280
-
         # ---------- shallow branch ----------
         # not used
+        hf_cat_up   = F.interpolate(hf_cat, size=rgb_sharp.shape[-2:], mode='nearest')
+        shallow_feat = self.stem_shallow(torch.cat([rgb_sharp, hf_cat_up], 1))
         shallow_ds = F.interpolate(
             shallow_feat, size=dec_ll.shape[-2:],
             mode='bilinear', align_corners=False)

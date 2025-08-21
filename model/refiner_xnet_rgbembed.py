@@ -251,7 +251,7 @@ class HFSE(nn.Module):
         w = w.mean(-1, keepdim=True)                 # (B, Cg, 1)
 
         w = w.view(B, self.Cg, 1, 1, 1)              # (B, Cg, 1, 1, 1)
-        out = x * w                                  # broadcast 乘权
+        out = x * w                                  # broadcast weigthed
         return out.view(B, C, H, W)
 
 
@@ -416,12 +416,13 @@ class BranchDecoder(nn.Module):
             x = block(x, feats[-(i + 2)])  # B, decoder_channels[-(i+2)], H_{L-i-1}, W_{L-i-1}
             dec_feats.append(x)
         return dec_feats, self.final_conv(x)
-        # return self.final_conv(x)
+
 
 def build_hf_enhance_structure(num_layers, layers_to_enhance=(2, 3), factor=2):
     # for channel doubling to specify the layers that needed to be enhanced
     # not used in the dinal model
     return {num_layers - 1 - l: factor for l in layers_to_enhance}
+
 
 class CrossAxisAttention(nn.Module):
     """
@@ -695,7 +696,7 @@ class refiner_xnet(nn.Module):
         )
         # channel-wise
         self.prefuse_hf = RGDF(channels=3*in_channels*L // 3, use_edge=True)
-
+        
         self.stem_shallow = ShallowDilatedStem(
             hf_in_ch, base_channels,
         )

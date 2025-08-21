@@ -22,21 +22,20 @@ wavelet_filters = {}
 wavelet_inv_filters = {}
 for name in SUPPORTED_WAVELETS:
     w = pywt.Wavelet(name)
-    # 分解滤波器（高低频），注意反转 dec_hi, dec_lo
-    # 小波变换在数学上定义为相关操作：y[n] = Σ h[k] * x[n+k]
-    # Conv2d执行卷积操作：y[n] = Σ h[k] * x[n-k]
-    # 卷积 = 相关 + 滤波器反转，所以要预先反转滤波器来补偿这个差异
+    # dec_hi, dec_lo
+    # DWT in marh：y[n] = Σ h[k] * x[n+k]
+    # cnn to simulate such process：y[n] = Σ h[k] * x[n-k]
+    # note that we need to transpose since we are using cnn
     dec_hi = torch.tensor(w.dec_hi[::-1], dtype=torch.float32)
     dec_lo = torch.tensor(w.dec_lo[::-1], dtype=torch.float32)
-    # 重构滤波器, 不需要反转，因为重构过程的数学定义与Conv2d一致
+    # reconstruction
     rec_hi = torch.tensor(w.rec_hi, dtype=torch.float32)
     rec_lo = torch.tensor(w.rec_lo, dtype=torch.float32)
 
-    # 分解时 2D 小波共轭对乘，4 个子带: LL, HL, LH, HH
-    # LL: 水平低频 × 垂直低频 → 近似分量（包含主要信息）
-    # HL: 水平高频 × 垂直低频 → 水平边缘
-    # LH: 水平低频 × 垂直高频 → 垂直边缘  
-    # HH: 水平高频 × 垂直高频 → 对角边缘
+    # LL: (horizontal lo) × (vertical lo) → LL (main information)
+    # HL: (horizontal hi) × (vertical lo) → horizontal edges
+    # LH: (horizontal lo) × (vertical hi) → vertical edges  
+    # HH: (horizontal hi) × (vertical hi) → diagonal edges
     filt = torch.stack([
         dec_lo.unsqueeze(0) * dec_lo.unsqueeze(1) / 2.0,
         dec_lo.unsqueeze(0) * dec_hi.unsqueeze(1),
@@ -44,7 +43,7 @@ for name in SUPPORTED_WAVELETS:
         dec_hi.unsqueeze(0) * dec_hi.unsqueeze(1)
     ], dim=0)[:, None]  # shape [4,1,k,k]
 
-    # 2D逆小波变换的4个重构滤波器
+    # reconstruction filter
     inv = torch.stack([
         rec_lo.unsqueeze(0) * rec_lo.unsqueeze(1) * 2.0,
         rec_lo.unsqueeze(0) * rec_hi.unsqueeze(1),
@@ -52,14 +51,13 @@ for name in SUPPORTED_WAVELETS:
         rec_hi.unsqueeze(0) * rec_hi.unsqueeze(1)
     ], dim=0)[:, None]  # shape [4,1,k,k]
 
-    # 将滤波器转换为不可训练的Variable（固定权重）
+    # make all unlearnable
     wavelet_filters[name]     = Variable(filt, requires_grad=False)
     wavelet_inv_filters[name] = Variable(inv,  requires_grad=False)
 
 
 # -----------------------------------------------------------------------------
-# 2. 封装成 Conv2d/ConvTranspose2d的DWT/IWT
-# 封装成pytorch模块也是为了更高效的GPU并行
+# DWT/IWT class
 # -----------------------------------------------------------------------------
 class WaveletDWTIWT(nn.Module):
     def __init__(self, wavelet_list: List[str]):
@@ -72,25 +70,25 @@ class WaveletDWTIWT(nn.Module):
             filt = wavelet_filters[name]      # [4,1,k,k]
             inv  = wavelet_inv_filters[name]  # [4,1,k,k]
             k = filt.size(-1)
-            pad = (k - 1) // 2  # 避免输入不能被2^L整除
+            pad = (k - 1) // 2  # input should be able to be divisible by 2^L
 
-            # 分解：Conv2d(in=1,out=4,stride=2)， 4是指4个子频带支路
+            # Conv2d(in=1,out=4,stride=2)， 4 -> 4 subbands
             conv = nn.Conv2d(1, 4, k, stride=2, padding=pad, bias=False)
             conv.weight.data.copy_(filt)
             conv.weight.requires_grad_(False)
             self.dwt_layers[name] = conv
 
-            # 重构：ConvTranspose2d(in=4,out=1,stride=2)
+            # iwt：ConvTranspose2d(in=4,out=1,stride=2)
             deconv = nn.ConvTranspose2d(4, 1, k, stride=2, padding=pad, bias=False)
             deconv.weight.data.copy_(inv)
             deconv.weight.requires_grad_(False)
             self.iwt_layers[name] = deconv
 
     def multi_dwt_concat(self, x: torch.Tensor, up_mode='nearest'):
-        # 级联拼接
-        # 不选平均或按位相加是因为会压缩信息
-        # L_n层的输入是L_n-1层分解的ll
-        # 所有的分解输出都上采样到与第一层的分辨率相同[H/2, W/2]
+        # cascade DWT
+        # no averaging all point-wise summation since information will be diluted
+        # L_n input is LL from L_n-1
+        # all decomposition upsample to first level resolution
         coeffs = []
         cur = x
 
@@ -121,18 +119,15 @@ class WaveletDWTIWT(nn.Module):
                               ll_cat: torch.Tensor,
                               hf_cat: torch.Tensor,
                               up_mode='nearest'):
-        """
-        从 ll_cat,hf_cat 恢复到原始分辨率
-        """
+        # cascade IWT
         B, c_mul_L, H1, W1 = ll_cat.shape
         L = len(self.wavelet_list)  # 级联级数
         C = c_mul_L // L
 
-        # 拆分
         ll_list = ll_cat.split(C, dim=1)
         hf_list = hf_cat.split(3*C, dim=1)
 
-        # 回到每级真实尺寸(下采样)
+        # downsample to actual dwt resolution; since we apply upsample during dwt
         ll_rev, hf_rev = [], []
         for i, (ll_u, hf_u) in enumerate(zip(ll_list, hf_list)):
             factor = 2 ** i
@@ -140,17 +135,17 @@ class WaveletDWTIWT(nn.Module):
             ll_rev.append(F.interpolate(ll_u, size=(Hi, Wi), mode=up_mode))
             hf_rev.append(F.interpolate(hf_u, size=(Hi, Wi), mode=up_mode))
 
-        # 逆变换
+        # inverse transform
         cur = ll_rev[-1]
         for name, hf_i in zip(reversed(self.wavelet_list), reversed(hf_rev)):
-            # 拼接 1 低频 + 3 高频
+            # hf_i: [B,3C,hi,wi]→[B,C*3,hi,wi] then concat
             Bc, _, hi, wi = cur.shape
             # 将 hf_i 从 [B,3C,hi,wi]→[B,C*3,hi,wi] 并 concat
             coeffs = []
             for c in range(C):
                 hi_c = hf_i[:, 3*c:3*c+3]
                 coeffs.append(torch.cat([cur[:, c:c+1], hi_c], dim=1))
-            # 对每通道块分别 deconv 再 concat
+            # inverse from n is the ll from n-1
             outs = []
             deconv = self.iwt_layers[name]
             for coeff in coeffs:
@@ -158,6 +153,7 @@ class WaveletDWTIWT(nn.Module):
             cur = torch.cat(outs, dim=1)  # (B, C, H, W) 
 
         return cur
+
 
 def conv3x3(in_ch, out_ch, stride=1, do_pad=True):
     pad = 1 if do_pad else 0
@@ -214,7 +210,8 @@ class BasicBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(out_channels, out_channels)
         self.bn2 = nn.BatchNorm2d(out_channels)
-        # downsample 用于在输入和输出维度不匹配时，对 identity 分支做 1x1 卷积或其他变换
+        # downsample to apply 1x1 conv or other transformation to the identity branch
+        # to avoid input and output dimension mismatch
         self.downsample = downsample
 
     def forward(self, x):
@@ -230,38 +227,15 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
         return out
 
-class LFSE(nn.Module):
-    def __init__(self, C_in, r=8):
-        """
-        C_in = 输入通道数（例如 3*L）
-        r    = reduction ratio
-        """
-        super().__init__()
-        r_eff = max(1, 2 ** int(math.log2(C_in)))
-        reduced = max(1, C_in // r_eff)
-
-        self.avg = nn.AdaptiveAvgPool2d(1)  # [B, C, H, W] → [B, C, 1, 1]
-        self.fc = nn.Sequential(
-            nn.Conv1d(C_in, reduced, 1, bias=False),
-            nn.ReLU(True),
-            nn.Conv1d(reduced, C_in, 1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        B, C, H, W = x.shape  # C = C_in = 3 × L
-        w = self.avg(x).view(B, C, 1)   # [B, C, 1, 1] → [B, C, 1]
-        w = self.fc(w).view(B, C, 1, 1) # [B, C, 1]
-        return x * w  
 
 class HFSE(nn.Module):
     def __init__(self, C_in, r=8):
         """
-        C_in = 3*C*L      ( 必须是 3 的倍数 )
-        r    = reduction  ( 如 8 / 16 )
+        C_in = 3*C*L      (must be divisible by 3; since HF has 3 subbands)
+        r    = reduction
         """
         super().__init__()
-        self.Cg = C_in // 3           # group 数 = C*L
+        self.Cg = C_in // 3           # group number = C*L
         r_eff = 2 ** int(math.log2(self.Cg)) if self.Cg >= 1 else 1
         reduced = self.Cg // r_eff
         self.avg = nn.AdaptiveAvgPool2d(1)
@@ -279,11 +253,10 @@ class HFSE(nn.Module):
         w = self.avg(x)                              # (B, Cg, 3, 1, 1)
         w = self.fc(w.squeeze(-1).squeeze(-1))       # (B, Cg, 3)
 
-        # ------ NEW: 把 3 个子带的权重再做平均，得到 1 个标量 ------
         w = w.mean(-1, keepdim=True)                 # (B, Cg, 1)
 
         w = w.view(B, self.Cg, 1, 1, 1)              # (B, Cg, 1, 1, 1)
-        out = x * w                                  # broadcast 乘权
+        out = x * w                                  # broadcast weighted
         return out.view(B, C, H, W)
 
 class RGDF(nn.Module):
@@ -292,7 +265,7 @@ class RGDF(nn.Module):
         self.use_edge = use_edge
         self.channels = channels
 
-        # 通道注意力：每个方向分量独立建模
+        # channel-wise attention: independent modeling of each directional component
         self.ca = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(channels, channels // 4, 1, bias=False),
@@ -301,7 +274,8 @@ class RGDF(nn.Module):
             nn.Sigmoid()
         )
 
-        # 残差融合：方向维度拼接后 → 卷积压缩融合
+        # residual fusion: concatenate along directional dimension then 
+        # conv compression and fusion
         self.fuse = nn.Sequential(
             nn.Conv2d(3 * channels, channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(channels),
@@ -317,7 +291,6 @@ class RGDF(nn.Module):
 
         hf_split = hf_cat.view(B, C, 3, H, W).permute(2, 0, 1, 3, 4)  # → [3, B, C, H, W]
 
-        # 每个方向子带做 CA（共享通道结构）
         ca_weighted = []
         for i in range(3):
             feat = hf_split[i]  # [B, C, H, W]
@@ -328,13 +301,14 @@ class RGDF(nn.Module):
             ca_weighted.append(feat * w)
 
         fused = torch.cat(ca_weighted, dim=1)  # [B, 3C, H, W]
-        out = self.fuse(fused) + hf_cat[:, :C]  # 残差连接（默认与第一个方向保持一致）
+        out = self.fuse(fused) + hf_cat[:, :C]  
         return out.repeat(1, 3, 1, 1)
+
 
 class BranchEncoder(nn.Module):
     """
-    动态多层编码器：以 base_channels 为基础通道数，后续各层通道数按深度自动计算，
-    层数由 num_layers 决定，每层包含相同数量的残差块。
+    Encoder (single branch);
+    In final model, two branches are identity, just processing different information
     """
     def __init__(self,
                  in_channels: int,
@@ -420,13 +394,17 @@ class BranchDecoder(nn.Module):
     def __init__(self, encoder_channels, base_channels, out_channels, enhance_structure=None):
         super().__init__()
 
-        # encoder_channels: [base_channels*2^0, base_channels*2^1, ..., base_channels*2^(num_layers-1)]
+        # (option) all specified layers (including the deepest layer) 
+        # underwent channel doubling
+        # not used in the final model
+        # encoder_channels: 
+        # [base_channels*2^0, base_channels*2^1, ..., base_channels*2^(num_layers-1)]
         decoder_channels = encoder_channels.copy()
         if enhance_structure:
             for i, factor in enhance_structure.items():
-                decoder_channels[i] *= factor  # 对所有指定层（包括最深层）进行了通道倍增
+                decoder_channels[i] *= factor
 
-        in_ch = decoder_channels[-1]  # 最深层 input_channels 也被增强为 C*factor
+        in_ch = decoder_channels[-1]  # on the deepest layer
         self.decoder_blocks = nn.ModuleList()
         for i in range(len(decoder_channels) - 2, -1, -1):
             skip_ch = decoder_channels[i]
@@ -441,28 +419,30 @@ class BranchDecoder(nn.Module):
             x = block(x, feats[-(i + 2)])  # B, decoder_channels[-(i+2)], H_{L-i-1}, W_{L-i-1}
             dec_feats.append(x)
         return dec_feats, self.final_conv(x)
-        # return self.final_conv(x)
+
 
 def build_hf_enhance_structure(num_layers, layers_to_enhance=(2, 3), factor=2):
+    # for channel doubling to specify the layers that needed to be enhanced
+    # not used in the dinal model
     return {num_layers - 1 - l: factor for l in layers_to_enhance}
+
 
 class CrossAxisAttention(nn.Module):
     """
     Cross-Axis Attention  
-    支持四种方向：
-        ─ row     : 同一行 (H 个序列, 长 W)
-        ─ col     : 同一列 (W 个序列, 长 H)
-        ─ diag    : 主/副对角线 (H+W-1 条序列)
-        ─ global  : 整幅图展开 (H*W)
-    `modes` 传入集合，例如 {'row','diag','global'} 表示开启这三条通路。
-    若想先排除对角线，只要把 'diag' 从集合里去掉即可。
+    Supports 4 directions：
+        ─ row     : same row slice
+        ─ col     : same column slice
+        ─ diag    : same main diagonal slice
+        ─ global  : whole image
+    Using main diagonal slice rather than all diagonal ones is to incur one reduction in throughput
     """
     def __init__(self, C_l: int, C_h: int, d_head: int = 128,
                  modes: set = {'row', 'col', 'diag', 'global'}):
         super().__init__()
         self.modes = modes
 
-        # ----------- Q K V 投影 ----------- #
+        # ----------- Q K V projection ----------- #
         self.qh = nn.Conv2d(C_h, d_head, 1, bias=False)
         self.kh = nn.Conv2d(C_h, d_head, 1, bias=False)
         self.vh = nn.Conv2d(C_h, d_head, 1, bias=False)
@@ -471,22 +451,23 @@ class CrossAxisAttention(nn.Module):
         self.kl = nn.Conv2d(C_l, d_head, 1, bias=False)
         self.vl = nn.Conv2d(C_l, d_head, 1, bias=False)
 
-        # ----------- 输出投影 ----------- #
+        # ----------- out projection ----------- #
         self.proj_h = nn.Conv2d(d_head, C_h, 1)
         self.proj_l = nn.Conv2d(d_head, C_l, 1)
         self.aux_h  = nn.Conv2d(C_h,   C_h, 1)
         self.aux_l  = nn.Conv2d(C_l,   C_l, 1)
 
-        # 可学习方向权重 (row/col/diag/global 对应 0-3)
+        # learnable weight for all directions
         self.alpha = nn.Parameter(torch.ones(4))
         self.direction2idx = {'row': 0, 'col': 1, 'diag': 2, 'global': 3}
 
-        # 对角索引缓存：键=(H,W)，值=(diag_idx, pos_idx)
+        # index buffer to accelerate diagonal fetech：
+        # K=(H,W), V=(diag_idx, pos_idx)
         self._diag_cache: dict[tuple[int,int],
                                tuple[torch.Tensor, torch.Tensor]] = {}
 
     # ------------------------------------------------------------------ #
-    # 内部工具：生成 / 复用 对角线索引
+    # generate index buffer for diagonal
     # ------------------------------------------------------------------ #
     def _diag_idx(self, H: int, W: int, device: torch.device):
         """
@@ -497,35 +478,29 @@ class CrossAxisAttention(nn.Module):
         """
         key = (H, W)
         if key not in self._diag_cache:
-            i = torch.arange(H).view(H, 1).expand(H, W)        # [H,W]
-            j = torch.arange(W).view(1, W).expand(H, W)        # [H,W]
-            diag = (j - i + (H - 1)).reshape(-1).long()        # 主对角线编号
-            pos  = torch.where(j >= i, i, j).reshape(-1).long()# 在该对角线中的偏序
-            self._diag_cache[key] = (diag, pos)                # 缓存在 CPU
+            i = torch.arange(H).view(H, 1).expand(H, W)         # [H,W]
+            j = torch.arange(W).view(1, W).expand(H, W)         # [H,W]
+            diag = (j - i + (H - 1)).reshape(-1).long()         # indexing along the main diagonal
+            pos  = torch.where(j >= i, i, j).reshape(-1).long() # partial ordering on this diagonal
+            self._diag_cache[key] = (diag, pos)                 # cached in the CPU
 
         diag_cpu, pos_cpu = self._diag_cache[key]
-        # 每次调用时搬到当前 GPU
+        # loaded onto the current GPU every time it is called
+        # to avoid conflicts under multi-GPU settings
         return diag_cpu.to(device, non_blocking=True), pos_cpu.to(device, non_blocking=True)
 
-    # ------------------------------------------------------------------ #
-    # 前向
-    # ------------------------------------------------------------------ #
     def forward(self, ll, hf, edge=None):
-        """
-        ll : 低频 (B, C_l, H, W)
-        hf : 高频 (B, C_h, H, W)
-        """
         B, C_l, H, W = ll.shape
         _, C_h, _, _ = hf.shape
         d   = self.qh.out_channels
         N   = H * W
-        scl = d ** -0.5                   # scaled dot-product 缩放
+        scl = d ** -0.5                   # scaled dot-product 
 
-        # ------- Q K V 映射 ------
+        # Q K V on global feature map
         if edge is None:
             Qh = self.qh(hf).view(B, d, N)
         else:
-            # edge : [B,1,H,W] → 用它当 Query（扩到通道数）
+            # edge : [B,1,H,W]
             edge.detach()
             Qh = self.qh(edge.expand(-1, hf.size(1), -1, -1)).contiguous().view(B, d, N)
         Kh = self.kh(hf).view(B, d, N)
@@ -534,11 +509,11 @@ class CrossAxisAttention(nn.Module):
         Kl = self.kl(ll).view(B, d, N)
         Vl = self.vl(ll).view(B, d, N)
 
-        # 空占位 (方向没启用时保持 0)
+        # placeholder
         z_ll = lambda: torch.zeros_like(ll)
         z_hf = lambda: torch.zeros_like(hf)
 
-        # 归一化方向权重
+        # norm directional weights
         wdir = torch.softmax(self.alpha, dim=0)
 
         out_ll_list, out_hf_list = [], []
@@ -607,7 +582,7 @@ class CrossAxisAttention(nn.Module):
             Ld = attn(Qh[:, :, flat_idx], Kl[:, :, flat_idx], Vl[:, :, flat_idx])  # (B,d,N)
             Hd = attn(Ql[:, :, flat_idx], Kh[:, :, flat_idx], Vh[:, :, flat_idx])  # (B,d,N)
 
-            # scatter 回 (B,d,N)
+            # scatter back to (B,d,N)
             blank_l = torch.zeros(B, d, N, device=ll.device, dtype=Ld.dtype)
             blank_l.scatter_(2,
                              flat_idx.unsqueeze(0).unsqueeze(0).expand(B, d, -1),
@@ -624,127 +599,66 @@ class CrossAxisAttention(nn.Module):
         else:
             out_ll_list.append(z_ll()); out_hf_list.append(z_hf())
 
-        # ---------------- 残差 & 辅助卷积 --------------- #
+        # ---------------- residual and helper conv --------------- #
         ll_out = self.aux_l(ll + sum(out_ll_list))
         hf_out = self.aux_h(hf + sum(out_hf_list))
         return ll_out, hf_out
 
-class PostHead(nn.Module):
-    def __init__(self, mid=32):
-        super().__init__()
-        self.guidance = nn.Sequential(
-            nn.Conv2d(3, 8, 1, bias=False),  # RGB guidance
-            nn.SiLU(True),
-        )
-        self.process = nn.Sequential(
-            nn.Conv2d(1, mid, 3, padding=1, bias=False),
-            nn.BatchNorm2d(mid),
-            nn.SiLU(True),
-            nn.Conv2d(mid, mid, 3, padding=1, groups=mid//4, bias=False),
-        )
-        self.fuse = nn.Conv2d(mid + 8, 1, 1, bias=False)
-
-    def forward(self, alpha, rgb):
-        g  = self.guidance(rgb)
-        p  = self.process(alpha)
-        out = self.fuse(torch.cat([p, g], 1))
-        return torch.sigmoid(out)
-
-class PostHeadResidual(nn.Module):
-    def __init__(self, feat_ch, rgb_ch, mid_ch=128, use_rgb=True):
-        super().__init__()
-
-        self.use_rgb = use_rgb
-        self.feat_ch = feat_ch
-        self.mid_ch = mid_ch
-
-        # 1. 投影层
-        self.proj = nn.Sequential(
-            nn.Conv2d(feat_ch, mid_ch, 3, padding=1, bias=True),
-            nn.BatchNorm2d(mid_ch),
-            nn.LeakyReLU(0.1, inplace=True),
-        )
-        # 2. 深度残差堆栈
-        self.resblocks = nn.Sequential(
-            ResidualBlock(mid_ch, mid_ch),
-        )
-        # 3. 再次激活扩展
-        self.post = nn.Sequential(
-            nn.Conv2d(mid_ch, mid_ch, 3, padding=1, bias=True),
-            nn.BatchNorm2d(mid_ch),
-            nn.LeakyReLU(0.1, inplace=True),
-        )
-        # 4. 融合 & 细节残差预测
-        if use_rgb:
-            self.fuse = nn.Conv2d(mid_ch + rgb_ch, feat_ch, 1, bias=True)
-        else:
-            self.fuse = nn.Conv2d(mid_ch, feat_ch, 1, bias=True)
-        # 5. 可导映射到 [0,1]
-        self.act_out = nn.Hardsigmoid()
-
-    def forward(self, recon_raw, rgb=None):
-        x = self.proj(recon_raw)
-        x = self.resblocks(x)
-        x = self.post(x)
-        if self.use_rgb and rgb is not None:
-            x = torch.cat([x, rgb], dim=1)
-        delta = self.fuse(x)
-        # 用 Hardsigmoid 保障在 [0,1] 且梯度友好
-        return self.act_out(recon_raw + delta)
 
 class EnhancedPostHeadResidual(nn.Module):
     def __init__(self, feat_ch, rgb_ch=3, mid_ch=128, use_rgb=True):
         super().__init__()
         self.use_rgb = use_rgb
 
-        # 1. 初始投影：将 recon_raw 映射到中间通道
+        # projecting recon_raw onto the intermediate channel space
         self.proj = nn.Sequential(
             nn.Conv2d(feat_ch, mid_ch, kernel_size=3, padding=1, bias=True),
             nn.BatchNorm2d(mid_ch),
             nn.LeakyReLU(0.1, inplace=True),
         )
 
-        # 2. Local 分支：提取局部结构特征（group conv 保留空间纹理）
+        # local branch: responsible for capturing local structural features
+        # with group convolution preserving spatial textures
         self.local_branch = nn.Conv2d(mid_ch, mid_ch, kernel_size=3, padding=1, groups=mid_ch // 4, bias=False)
 
-        # 3. Global 分支：通道注意力（类似 squeeze-excitation）
+        # global branch：applying channel attention (akin to squeeze-excitation)
         self.global_branch = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(mid_ch, mid_ch, kernel_size=1, bias=True),
             nn.Sigmoid()
         )
 
-        # 4. 正宗 ResidualBlock（复用你的已有定义）
         self.resblock = ResidualBlock(mid_ch, mid_ch)
 
-        # 5. 融合 & 输出 delta
+        # fuse and output delta
         in_fuse_ch = mid_ch + rgb_ch if use_rgb else mid_ch
         self.fuse = nn.Conv2d(in_fuse_ch, feat_ch, kernel_size=1, bias=True)
 
-        # 6. Hardsigmoid 保障输出在 [0,1]
         self.act_out = nn.Hardsigmoid()
 
     def forward(self, recon_raw, rgb=None):
         x = self.proj(recon_raw)  # B, mid_ch, H, W
 
-        # Local-global 注意力调制
-        local_feat = self.local_branch(x)                   # 局部响应
-        global_weight = self.global_branch(x)               # 通道注意力
-        fused_feat = local_feat * global_weight + local_feat  # 残差调制
+        local_feat = self.local_branch(x)               
+        global_weight = self.global_branch(x)            
+        fused_feat = local_feat * global_weight + local_feat  
 
-        # 经过 ResidualBlock（包含 skip connection）
         res_feat = self.resblock(fused_feat)
 
-        # 可选 RGB 引导
+        # (option) RGB guided
+        # not used
         if self.use_rgb and rgb is not None:
             res_feat = torch.cat([res_feat, rgb], dim=1)
 
         delta = self.fuse(res_feat)
-        return self.act_out(recon_raw + delta)  # 明确 residual
+        return self.act_out(recon_raw + delta)
 
 
 class ShallowDilatedStem(nn.Module):
-    """保持 H×W 的 dilated conv 路径，用来保留 1–2 px 级细节"""
+    """
+    maintain the H×W dilated convolution pathway for retaining 
+    fine details at the 1–2 pixel level
+    """
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.convs = nn.Sequential(
@@ -757,8 +671,9 @@ class ShallowDilatedStem(nn.Module):
     def forward(self, x):
         return self.convs(x)
 
+
 # -----------------------------------------------------------------------------
-# 整体网络接口更新：两个分支编码器
+# main architecture
 # -----------------------------------------------------------------------------
 class refiner_xnet(nn.Module):
     def __init__(self,
@@ -778,20 +693,19 @@ class refiner_xnet(nn.Module):
         ll_in_ch = in_channels + in_channels * L          # = 3 + 3L
         hf_in_ch = in_channels + 3 * in_channels * L      # = 3 + 9L
 
-        # 空间
+        # spatial-wise
         self.sa_hf = nn.Sequential(
             nn.Conv2d(3*in_channels*L, 1, kernel_size=7, padding=3, bias=False),
             nn.Sigmoid()
         )
-        # 通道
-        # self.se_hf = HFSE(C_in = 3*in_channels*L, r=8)
+        # channel-wise
         self.prefuse_hf = RGDF(channels=3*in_channels*L // 3, use_edge=True)
-
+        
         self.stem_shallow = ShallowDilatedStem(
             hf_in_ch, base_channels,
         )
 
-        # ── 编码器 ──
+        # ── dual-branch encoder ──
         self.encoder_ll = BranchEncoder(ll_in_ch, base_channels,
                                         num_layers, blocks_per_layer)
         self.encoder_hf = BranchEncoder(hf_in_ch, base_channels,
@@ -801,64 +715,37 @@ class refiner_xnet(nn.Module):
                             for i in range(num_layers)]
 
         self.cross_attn_bn = CrossAxisAttention(
-            C_l=encoder_channels[-1],     # 最深层通道
+            C_l=encoder_channels[-1],     # deepest layer
             C_h=encoder_channels[-1],
             d_head=d_head,
             modes=modes_bn,
             )
         self.cross_attn_mid = CrossAxisAttention(
-            C_l=encoder_channels[-2],     # 倒数第二层
+            C_l=encoder_channels[-2],     # the second-to-last layer
             C_h=encoder_channels[-2],
             d_head=d_head//2,
             modes=modes_mid,
             )
 
-        # （可选）HF 通道增强
-        """hf_enhance_structure = build_hf_enhance_structure(
-            num_layers, layers_to_enhance=(1, 0), factor=2)
-        self.hf_expanders = nn.ModuleDict({
-            str(i): nn.Conv2d(encoder_channels[i],
-                              encoder_channels[i] * f, 1, bias=False)
-            for i, f in hf_enhance_structure.items()
-        })"""
-
-        # ── 解码器 ──
+        # ── dual branch decoder ──
         self.decoder_ll = BranchDecoder(encoder_channels, base_channels, 1 * L)
         self.decoder_hf = BranchDecoder(encoder_channels, base_channels,
                                         3 * 1 * L, enhance_structure=None)
+        # shallow branch
+        # not used
         self.shallow2ll = nn.Conv2d(base_channels, 1*L, 1, bias=False)
         self.shallow2hf = nn.Conv2d(base_channels, 3*1*L, 1, bias=False)
 
-        # 对 BN‐level cross‐attn 输出做投影
+        # BN‐level cross‐attn
         self.attn_bn_head_ll  = nn.Conv2d(encoder_channels[-1], 1, kernel_size=1, bias=False)
         self.attn_bn_head_hf  = nn.Conv2d(encoder_channels[-1], 1, kernel_size=1, bias=False)
-        # 对 Mid‐level cross‐attn 输出做投影 
+        # Mid‐level cross‐attn 
         self.attn_mid_head_ll = nn.Conv2d(encoder_channels[-2], 1, kernel_size=1, bias=False)
         self.attn_mid_head_hf = nn.Conv2d(encoder_channels[-2], 1, kernel_size=1, bias=False)
-        # 对 Shallow 分支特征做投影
+        # shallow branch (not used)
         self.shallow_head     = nn.Conv2d(base_channels, 1, kernel_size=1, bias=False)
 
-        # ── post fuse ──
-        """self.post = nn.Sequential(
-            nn.Conv2d(1, 8, 3, padding=1, bias=False),   # 1→8, dense conv
-            nn.BatchNorm2d(8),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(8, 8, 3, padding=1, groups=8, bias=False),  # DW conv
-            nn.Conv2d(8, 1, 3, padding=1, bias=False),    # fuse back to single‑channel α
-            nn.Sigmoid()
-        )"""
-        """self.post = nn.Sequential(
-            nn.Conv2d(1, 8, 3, padding=1, bias=False),   # 1→8, dense conv
-            nn.BatchNorm2d(8),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(8, 8, 3, padding=1, groups=4, bias=False),  # DW conv
-            nn.Conv2d(8, 1, 3, padding=1, bias=False),    # fuse back to single‑channel α
-            nn.Sigmoid()
-        )"""
-        # self.post = PostHead(mid=32)
-        """self.post = PostHeadResidual(
-            feat_ch=1, rgb_ch=3, mid_ch=64, use_rgb=False
-        )"""
+        # ── post head ──
         self.post = EnhancedPostHeadResidual(
             feat_ch=1, rgb_ch=3, mid_ch=64, use_rgb=False
         )
@@ -866,12 +753,12 @@ class refiner_xnet(nn.Module):
 
     # -----------------------------------------------------------------
     def forward(self, rgb: torch.Tensor, guide_mask: torch.Tensor):
-        # kernel=5, 轻微锐化，alpha 可调（0.5~1.0 之间）
+       # slightly sharpen rgb input
         alpha = 0.7
-        blur  = F.avg_pool2d(rgb, kernel_size=5, stride=1, padding=2)  # 均值模糊
+        blur  = F.avg_pool2d(rgb, kernel_size=5, stride=1, padding=2)
         rgb_sharp = rgb + alpha * (rgb - blur)
 
-        # ---------- Wavelet 分解 ----------
+        # ---------- DWT ----------
         ll_cat, hf_cat = self.wave.multi_dwt_concat(rgb_sharp)
         edge_map = hf_cat.abs().mean(1, keepdim=True)
 
@@ -885,7 +772,7 @@ class refiner_xnet(nn.Module):
         in_ll = torch.cat([rgb_ds, ll_cat], dim=1)
         in_hf = torch.cat([rgb_ds, hf_cat], dim=1)
 
-        feats_ll = self.encoder_ll(in_ll)   # list 长度 = num_layers
+        feats_ll = self.encoder_ll(in_ll)   # list len = num_layers
         feats_hf = self.encoder_hf(in_hf)
 
         # ——— BN‐level cross‐attn ———
@@ -901,42 +788,22 @@ class refiner_xnet(nn.Module):
         pred_attn_mid_ll = self.attn_mid_head_ll(attn_mid_ll)
         pred_attn_mid_hf = self.attn_mid_head_hf(attn_mid_hf)"""
 
-        # ---------- HF 通道扩展 ----------
-        """for idx, exp in self.hf_expanders.items():
-            feats_hf[int(idx)] = exp(feats_hf[int(idx)])"""
-
-        # ---------- 解码 & IWT 重建 ----------
-        dec_feats_ll, dec_ll = self.decoder_ll(feats_ll)      # dec_ll: 360×640
+        # ---------- decode & IWT ----------
+        dec_feats_ll, dec_ll = self.decoder_ll(feats_ll)
         dec_feats_hf, dec_hf = self.decoder_hf(feats_hf)
 
+        # ---------- shallow branch ----------
+        # not used
         hf_cat_up   = F.interpolate(hf_cat, size=rgb_sharp.shape[-2:], mode='nearest')
-        shallow_feat = self.stem_shallow(torch.cat([rgb_sharp, hf_cat_up], 1))  # 720×1280
-        # ↓↓↓  关键：下采样到 decoder 最浅层 / ll_cat 分辨率 (H/2, W/2)
+        shallow_feat = self.stem_shallow(torch.cat([rgb_sharp, hf_cat_up], 1))
         shallow_ds = F.interpolate(
-            shallow_feat, size=dec_ll.shape[-2:],  # (360,640)
+            shallow_feat, size=dec_ll.shape[-2:],
             mode='bilinear', align_corners=False)
-        # 生成单通道 shallow map 预测
         pred_shallow   = self.shallow_head(shallow_ds)
-
-        # 1) 给 Decoder feature 注入细节
-        # dec_feats_ll[-1] = dec_feats_ll[-1] + shallow_ds
-        # dec_feats_hf[-1] = dec_feats_hf[-1] + shallow_ds
-
-        # 2) 注入 IWT 重建分量
-        """proj_ll = self.shallow2ll(shallow_ds)
-        proj_hf = self.shallow2hf(shallow_ds)
-        dec_ll = dec_ll + proj_ll
-        dec_hf = dec_hf + proj_hf"""
 
         recon_raw = self.wave.multi_iwt_from_concat(dec_ll, dec_hf)
         recon     = self.post(recon_raw, None)
-        """with torch.no_grad():
-            r = recon.view(-1)
-            print(f"Sigmoid→recon range: min={r.min().item():.4f}, max={r.max().item():.4f}")
-            print(f"  mean={r.mean().item():.4f}, std={r.std().item():.4f}")
-            pct_in = ((r>=0)&(r<=1)).float().mean().item()*100
-            print(f"  percent in [0,1]: {pct_in:.2f}%")
-        """
+
         return (feats_ll, feats_hf, ll_cat, hf_cat,
                 dec_feats_ll, dec_feats_hf, pred_shallow, 
                 None, None, None, 
@@ -945,16 +812,14 @@ class refiner_xnet(nn.Module):
 
 
 if __name__ == "__main__":
-    # 测试 main 函数
-    # 使用默认配置：wavelet_list=["db1","db2","db4"], base_channels=64, num_layers=4, blocks_per_layer=2
+    # test model
     model = refiner_xnet()
-    # 构造假输入：batch=1, 3通道, 高720, 宽1280
+    # pseudo input：batch=1, 3*720*1280
     dummy_input = torch.randn(2, 3, 720, 1280)
     dummy_guide = torch.randn(2, 1, 720, 1280)
     feats_ll, feats_hf, ll_cat, hf_cat, dec_feats_ll, dec_feats_hf, \
     shallow_ds, attn_bn_ll, attn_bn_hf, attn_mid_ll, \
     attn_mid_hf, recon_raw, recon = model(dummy_input, dummy_guide)
-    # 打印各分支特征和重构图形状
     print("Low-frequency branch feature maps:")
     for i, f in enumerate(feats_ll):
         print(f"  Layer {i}: {tuple(f.shape)}")
