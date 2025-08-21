@@ -20,7 +20,7 @@ import cv2
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, PROJECT_ROOT)
 
-from pipeline.utils import _unknown_mask
+from pipeline.utils import unknown_mask
 
 
 _GD_CACHE = {}  # for GRAD
@@ -65,7 +65,7 @@ def compute_sad(
     scaled:     bool = True,   # True -> /1000 as a general scale in matting research
 ) -> torch.Tensor:
     diff = (alpha_pred - alpha_gt).abs()                      # (B,1,H,W)
-    mask = _unknown_mask(trimap).to(diff.dtype)               # (B,1,H,W)
+    mask = unknown_mask(trimap).to(diff.dtype)               # (B,1,H,W)
 
     sad_per_img = (diff * mask).flatten(1).sum(dim=1)         # (B,)
     if scaled:
@@ -89,7 +89,7 @@ def compute_mse_unknown(
     reduction:  str  = 'none',   # 'none'，for whole dataset: sum/n 聚合
     scaled:     bool = True,     # True -> ×1e3 as general scale
 ) -> torch.Tensor:
-    mask = _unknown_mask(trimap).to(alpha_pred.dtype)                     # (B,1,H,W)
+    mask = unknown_mask(trimap).to(alpha_pred.dtype)                     # (B,1,H,W)
     num = ((alpha_pred - alpha_gt) ** 2 * mask).flatten(1).sum(dim=1)    # (B,)
     den = mask.flatten(1).sum(dim=1) + 1e-8                              # (B,)
     mse = num / den                                                      # (B,)
@@ -176,7 +176,7 @@ def compute_gradient_error_maggie(
     grad_g = torch.sqrt(gx_g * gx_g + gy_g * gy_g)
 
     # Unknown mask（B,1,H,W）
-    mask = _unknown_mask(trimap).to(dtype=dtype)
+    mask = unknown_mask(trimap).to(dtype=dtype)
 
     # per-image pixel sum (no normalization, no scaling)
     diff = (grad_p - grad_g) ** 2
@@ -224,7 +224,7 @@ def compute_connectivity_error_maggie(
         gt_b = gt_np[b]
 
         # Unknown ROI
-        roi_mask = _unknown_mask(torch.from_numpy(trimap_np[b])).numpy().astype(np.float32)
+        roi_mask = unknown_mask(torch.from_numpy(trimap_np[b])).numpy().astype(np.float32)
 
         # round_down_map
         rdm = -np.ones_like(gt_b, dtype=np.float32)
@@ -259,7 +259,7 @@ def compute_connectivity_error_maggie(
         # φ mapping (only applied when difference >= 0.15)
         gt_diff = gt_b - rdm
         pred_diff = pred_b - rdm
-        gt_phi = 1.0 - gt_diff * (gt_dif >= 0.15)
+        gt_phi = 1.0 - gt_diff * (gt_diff >= 0.15)
         pred_phi = 1.0 - pred_diff * (pred_diff >= 0.15)
         # pixel sum for a single image
         conn_sum = np.sum(np.abs(gt_phi - pred_phi) * roi_mask).astype(np.float32)
