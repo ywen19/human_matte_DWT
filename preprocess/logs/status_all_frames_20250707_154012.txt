@@ -1,0 +1,75 @@
+=== System Information ===
+Timestamp: Mon Jul  7 15:40:12 EDT 2025
+Mode: all_frames
+Debug: false
+Workers: auto
+
+=== GPU Information ===
+/usr/bin/nvidia-modprobe: unrecognized option: "-s"
+
+ERROR: Invalid commandline, please run `/usr/bin/nvidia-modprobe --help`
+       for usage information.
+
+/usr/bin/nvidia-modprobe: unrecognized option: "-s"
+
+ERROR: Invalid commandline, please run `/usr/bin/nvidia-modprobe --help`
+       for usage information.
+
+Mon Jul  7 15:40:18 2025       
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 525.105.17   Driver Version: 525.105.17   CUDA Version: 12.0     |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|                               |                      |               MIG M. |
+|===============================+======================+======================|
+|   0  NVIDIA GeForce ...  Off  | 00000000:01:00.0 Off |                  N/A |
+| 40%   43C    P0   114W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   1  NVIDIA GeForce ...  Off  | 00000000:24:00.0 Off |                  N/A |
+| 40%   42C    P0   107W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   2  NVIDIA GeForce ...  Off  | 00000000:41:00.0 Off |                  N/A |
+| 41%   49C    P0   110W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   3  NVIDIA GeForce ...  Off  | 00000000:61:00.0 Off |                  N/A |
+| 42%   46C    P0   105W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   4  NVIDIA GeForce ...  Off  | 00000000:81:00.0 Off |                  N/A |
+| 30%   44C    P0   110W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   5  NVIDIA GeForce ...  Off  | 00000000:A1:00.0 Off |                  N/A |
+| 34%   47C    P0   112W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   6  NVIDIA GeForce ...  Off  | 00000000:C1:00.0 Off |                  N/A |
+| 33%   45C    P0   108W / 350W |      0MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   7  NVIDIA GeForce ...  Off  | 00000000:E1:00.0 Off |                  N/A |
+| 30%   41C    P0   107W / 350W |      0MiB / 24576MiB |      2%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+                                                                               
++-----------------------------------------------------------------------------+
+| Processes:                                                                  |
+|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
+|        ID   ID                                                   Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+
+=== Memory Information ===
+              total        used        free      shared  buff/cache   available
+Mem:           251G        6.6G         38G         43M        206G        243G
+Swap:          2.0G        427M        1.6G
+
+=== Disk Space ===
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2  879G  609G  226G  74% /
+
