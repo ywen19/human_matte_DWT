@@ -1,0 +1,45 @@
+name: sam2_yolo
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip=23.0
+  - ffmpeg  # from conda-forge
+  - git
+  - pip:
+      # 核心依赖（使用更宽泛的numpy版本）
+      - numpy>=1.21.0,<2.0.0
+      - opencv-python>=4.8.0,<5.0.0
+      - matplotlib>=3.7.0,<4.0.0
+      - pycocotools>=2.0.0
+      - jupyterlab
+      - ipywidgets
+      - hydra-core>=1.3.0
+      - iopath>=0.1.0
+      - pillow>=9.0.0,<11.0.0
+      - huggingface_hub>=0.20.0
+      - transformers>=4.30.0,<5.0.0
+      - cython
+      - gitpython>=3.0.0
+      - hickle>=5.0.0
+      - tensorboard>=2.10.0
+      - scipy>=1.9.0,<2.0.0
+      - tqdm>=4.60.0
+      - gradio>=3.30.0,<5.0.0
+      - gdown>=4.0.0
+      - einops>=0.6.0,<1.0.0
+      - PySide6>=6.0.0
+      - charset-normalizer>=3.0.0
+      - netifaces>=0.10.0
+      - cchardet>=2.0.0
+      - easydict
+      - av>=0.5.0,<12.0.0
+      - imageio>=2.30.0,<3.0.0
+      - ultralytics>=8.0.0,<9.0.0
+      - kornia>=0.7.0,<1.0.0
+      - PyWavelets>=1.4.0,<2.0.0
+      - setuptools>=60.0.0
+      - wheel>=0.40.0
