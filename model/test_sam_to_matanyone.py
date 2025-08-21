@@ -1,3 +1,8 @@
+"""
+Test sam2-matanyone pipeline;
+this is for comparison study
+"""
+
 import os
 import argparse
 import torch

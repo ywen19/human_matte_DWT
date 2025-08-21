@@ -79,7 +79,7 @@ class WaveletDWTIWT(nn.Module):
             conv.weight.requires_grad_(False)
             self.dwt_layers[name] = conv
 
-            # 重构：ConvTranspose2d(in=4,out=1,stride=2)
+            # iwt: ConvTranspose2d(in=4,out=1,stride=2)
             deconv = nn.ConvTranspose2d(4, 1, k, stride=2, padding=pad, bias=False)
             deconv.weight.data.copy_(inv)
             deconv.weight.requires_grad_(False)
@@ -274,7 +274,8 @@ class RGDF(nn.Module):
             nn.Sigmoid()
         )
 
-        # residual fusion: concatenate along directional dimension then conv compression and fusion
+        # residual fusion: concatenate along directional dimension then 
+        # conv compression and fusion
         self.fuse = nn.Sequential(
             nn.Conv2d(3 * channels, channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(channels),
@@ -396,9 +397,11 @@ class BranchDecoder(nn.Module):
     def __init__(self, encoder_channels, base_channels, out_channels, enhance_structure=None):
         super().__init__()
 
-        # (option) all specified layers (including the deepest layer) underwent channel doubling
+        # (option) all specified layers (including the deepest layer) 
+        # underwent channel doubling
         # not used in the final model
-        # encoder_channels: [base_channels*2^0, base_channels*2^1, ..., base_channels*2^(num_layers-1)]
+        # encoder_channels: 
+        # [base_channels*2^0, base_channels*2^1, ..., base_channels*2^(num_layers-1)]
         decoder_channels = encoder_channels.copy()
         if enhance_structure:
             for i, factor in enhance_structure.items():
@@ -471,11 +474,11 @@ class CrossAxisAttention(nn.Module):
     def _diag_idx(self, H: int, W: int, device: torch.device):
         key = (H, W)
         if key not in self._diag_cache:
-            i = torch.arange(H).view(H, 1).expand(H, W)        # [H,W]
-            j = torch.arange(W).view(1, W).expand(H, W)        # [H,W]
-            diag = (j - i + (H - 1)).reshape(-1).long()        # indexing along the main diagonal
-            pos  = torch.where(j >= i, i, j).reshape(-1).long()# partial ordering on this diagonal
-            self._diag_cache[key] = (diag, pos)                # cached in the CPU
+            i = torch.arange(H).view(H, 1).expand(H, W)         # [H,W]
+            j = torch.arange(W).view(1, W).expand(H, W)         # [H,W]
+            diag = (j - i + (H - 1)).reshape(-1).long()         # indexing along the main diagonal
+            pos  = torch.where(j >= i, i, j).reshape(-1).long() # partial ordering on this diagonal
+            self._diag_cache[key] = (diag, pos)                 # cached in the CPU
 
         diag_cpu, pos_cpu = self._diag_cache[key]
         # loaded onto the current GPU every time it is called
@@ -483,15 +486,11 @@ class CrossAxisAttention(nn.Module):
         return diag_cpu.to(device, non_blocking=True), pos_cpu.to(device, non_blocking=True)
 
     def forward(self, ll, hf, edge=None):
-        """
-        ll : 低频 (B, C_l, H, W)
-        hf : 高频 (B, C_h, H, W)
-        """
         B, C_l, H, W = ll.shape
         _, C_h, _, _ = hf.shape
         d   = self.qh.out_channels
         N   = H * W
-        scl = d ** -0.5  # scaled dot-product 缩放
+        scl = d ** -0.5  # scaled dot-product 
 
         # Q K V on global feature map
         if edge is None:
