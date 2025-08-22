@@ -166,7 +166,6 @@ cython_debug/
 *.pt
 *.mp4
 *.pth
-*.png
 # dataset for assignment
 data/
 MatAnyone/
